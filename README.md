@@ -1,6 +1,96 @@
 # pi-rules
 
-pi agent rules in a Nix flake, loaded per repository
+pi extension that applies rules per repository: instructions, permissions and hooks.
+
+pi has no rules of its own beyond `AGENTS.md` files, and those live in the repositories. The
+[`repo-rules`](extensions/repo-rules/README.md) extension applies rules that you configure in one
+place, per repository or everywhere, without files in the repositories. It works like `repo-skills`
+in [pi-skills](https://github.com/Patrick-Kappen/pi-skills) and `repo-mcp` in
+[pi-mcp-servers](https://github.com/Patrick-Kappen/pi-mcp-servers).
+
+- **Rules**: Markdown instructions. A rule without `paths` goes into the system prompt; a rule with
+  `paths` globs is added when pi reads or changes a matching file, like the path-specific rules of
+  Claude Code.
+
+| Rule | What it says |
+|---|---|
+| [`conventional-commits`](rules/conventional-commits.md) | Commit messages, branches and PR titles |
+
+## Use with Home Manager
+
+```nix
+{
+  inputs.pi-rules = {
+    url = "github:Patrick-Kappen/pi-rules/v1.0.0"; # a release tag, or the `latest` branch
+    inputs.nixpkgs.follows = "nixpkgs";
+    inputs.home-manager.follows = "home-manager";
+  };
+}
+```
+
+```nix
+{ inputs, ... }:
+{
+  imports = [ inputs.pi-rules.homeModules.default ];
+
+  programs.pi-rules = {
+    enable = true;
+
+    # Everywhere, also outside git repositories.
+    global.rules = [ "conventional-commits" ];
+
+    # Per repository, on top of global.
+    repos."my-org/infra".rules = [ ./rules/terraform.md ];   # a rule from your own configuration
+    repos."my-org/*".rules = [ "conventional-commits" ];     # every repository of an owner
+    repos."~/src/project".rules = [ "~/rules/project.md" ];  # a directory; a file outside the store
+  };
+}
+```
+
+The module installs the extension in `~/.pi/agent/extensions/repo-rules` and writes
+`~/.pi/agent/repo-rules.json`.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `global.rules` | `[ ]` | Rules that apply everywhere. |
+| `repos.<pattern>.rules` | `[ ]` | Rules for the repositories that match: `owner/repo`, `host/owner/repo`, `owner/*`, a path such as `~/src/project`, or `*`. See the [extension README](extensions/repo-rules/README.md#repos-patterns). |
+| `package` | `packages.<system>.repo-rules` | The extension. |
+| `rulesPackage` | `packages.<system>.rules` | The rules of this flake. |
+| `agentDir` | `.pi/agent` | pi's agent directory relative to home. |
+
+A rule entry is the name of a rule of this flake, a Nix path (copied to the store), or an absolute
+path or `~/path` (read as it is, so you can change it without a rebuild).
+
+In pi, `/repo-rules` shows which scopes and rules apply to the current repository. After changing
+the configuration or a rule, run `/reload` in pi.
+
+## Writing a rule
+
+```markdown
+---
+paths:
+  - "src/api/**/*.ts"
+---
+
+# API rules
+
+- Validate the input of every endpoint.
+```
+
+Leave out the front matter for a rule that always applies. The
+[extension README](extensions/repo-rules/README.md#rules) describes the globs. To share a rule, add
+it to `rules/<name>.md` in this repository; it is then available by its name.
+
+## Layout
+
+| Path | Contains |
+|---|---|
+| `rules/` | The rules of this flake |
+| `extensions/repo-rules/` | The extension, with unit tests |
+| `test/integration/` | Runs the extension in pi's own session, with a scripted model |
+| `nix/package.nix`, `nix/rules.nix` | The packages `repo-rules` and `rules` |
+| `nix/home-manager.nix` | The Home Manager module |
+| `nix/checks.nix`, `test/nix/` | Flake checks: packages, module, and the generated files with node |
 
 ## Development
 

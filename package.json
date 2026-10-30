@@ -2,7 +2,7 @@
   "name": "pi-rules",
   "version": "0.0.0",
   "private": true,
-  "description": "pi agent rules in a Nix flake, loaded per repository",
+  "description": "pi extension that applies rules per repository: instructions, permissions and hooks",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -16,13 +16,20 @@
     "typecheck": "tsc",
     "test": "vitest run",
     "coverage": "vitest run --coverage",
-    "knip": "knip"
+    "knip": "knip",
+    "test:unit": "vitest run --project unit",
+    "test:integration": "vitest run --project integration"
   },
   "devDependencies": {
+    "@earendil-works/pi-ai": "^1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
     "@types/node": "^24.19.2",
     "@vitest/coverage-v8": "^5.0.5",
     "knip": "^6.44.0",
     "typescript": "^7.0.2",
     "vitest": "^5.0.5"
+  },
+  "overrides": {
+    "undici": "^8.12.3"
   }
 }
