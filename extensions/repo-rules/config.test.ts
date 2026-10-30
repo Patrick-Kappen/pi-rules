@@ -34,9 +34,9 @@ describe("parseConfig", () => {
     expect(config).toEqual({
       path: "cfg",
       scopes: [
-        { name: "global", pattern: "*", rules: ["/rules/a.md", "/home/u/rules/b.md"], permissions: [] },
-        { name: "owner/repo", pattern: "owner/repo", rules: ["/rules/c.md"], permissions: [] },
-        { name: "~/src", pattern: "~/src", rules: [], permissions: [] },
+        { name: "global", pattern: "*", rules: ["/rules/a.md", "/home/u/rules/b.md"], permissions: [], hooks: [] },
+        { name: "owner/repo", pattern: "owner/repo", rules: ["/rules/c.md"], permissions: [], hooks: [] },
+        { name: "~/src", pattern: "~/src", rules: [], permissions: [], hooks: [] },
       ],
       errors: [],
     });
@@ -60,19 +60,19 @@ describe("parseConfig", () => {
     const config = parseConfig(
       {
         other: true,
-        global: { rules: ["relative.md", 3, "/ok.md"], hooks: {} },
+        global: { rules: ["relative.md", 3, "/ok.md"], other: {} },
         repos: { " ": {}, "a/b": "x", "c/d": { rules: "x" } },
       },
       "cfg",
       home,
     );
     expect(config.scopes).toEqual([
-      { name: "global", pattern: "*", rules: ["/ok.md"], permissions: [] },
-      { name: "c/d", pattern: "c/d", rules: [], permissions: [] },
+      { name: "global", pattern: "*", rules: ["/ok.md"], permissions: [], hooks: [] },
+      { name: "c/d", pattern: "c/d", rules: [], permissions: [], hooks: [] },
     ]);
     expect(config.errors).toEqual([
       'cfg: unknown key "other"',
-      'cfg: global: unknown key "hooks"',
+      'cfg: global: unknown key "other"',
       'cfg: global: rule "relative.md" is not an absolute path or ~/path',
       "cfg: global: rule 3 is not an absolute path or ~/path",
       "cfg: repos: empty pattern",
@@ -133,7 +133,7 @@ describe("loadConfig", () => {
     const file = join(dir, "ok.json");
     writeFileSync(file, JSON.stringify({ global: { rules: ["/a.md"] } }));
     expect(loadConfig(file, home).scopes).toEqual([
-      { name: "global", pattern: "*", rules: ["/a.md"], permissions: [] },
+      { name: "global", pattern: "*", rules: ["/a.md"], permissions: [], hooks: [] },
     ]);
   });
 

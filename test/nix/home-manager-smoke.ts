@@ -31,21 +31,25 @@ async function rulesIn(cwd: string): Promise<{ section: string; added: string; b
   } as unknown as RepoRulesApi;
   createRepoRules(pi, { env: { PI_REPO_RULES_CONFIG: config }, home: tmpdir() });
   const ctx = { cwd, hasUI: false, sessionManager: { buildContextEntries: () => [] } };
-  handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, ctx);
+  await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, ctx);
   const start = { type: "before_agent_start", systemPromptOptions: { sections: {} as Record<string, string> } };
-  handlers.get("before_agent_start")?.(start, ctx);
-  const result = handlers.get("tool_result")?.(
+  await handlers.get("before_agent_start")?.(start, ctx);
+  const result = (await handlers.get("tool_result")?.(
     { type: "tool_result", toolCallId: "1", toolName: "read", input: { path: "src/api/users.ts" }, content: [] },
     ctx,
-  ) as { content: Array<{ text: string }> } | undefined;
+  )) as { content: Array<{ text: string }> } | undefined;
   const call = (await handlers.get("tool_call")?.(
     { type: "tool_call", toolCallId: "2", toolName: "read", input: { path: ".env" } },
     ctx,
   )) as { block?: boolean } | undefined;
+  const commit = (await handlers.get("tool_call")?.(
+    { type: "tool_call", toolCallId: "3", toolName: "bash", input: { command: "git commit -m x" } },
+    ctx,
+  )) as { reason?: string } | undefined;
   return {
     section: start.systemPromptOptions.sections.repo_rules ?? "",
     added: result?.content[0]?.text ?? "",
-    blocked: call?.block === true,
+    blocked: call?.block === true && commit?.reason?.endsWith(": no") === true,
   };
 }
 
@@ -57,6 +61,6 @@ for (const [remote, inScope] of cases) {
   const { section, added, blocked } = await rulesIn(repo(remote));
   if (!section.includes("Conventional Commits")) throw new Error(`${remote}: no global rule in ${section}`);
   if (added.includes("API-RULE-TEXT") !== inScope) throw new Error(`${remote}: unexpected tool result: ${added}`);
-  if (!blocked) throw new Error(`${remote}: reading .env was not denied`);
+  if (!blocked) throw new Error(`${remote}: reading .env or git commit was not blocked`);
   process.stdout.write(`ok ${remote}\n`);
 }

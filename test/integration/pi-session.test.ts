@@ -1,7 +1,7 @@
 // Runs pi's own session with a scripted model: the extension loads from the agent directory, puts the
 // global rule in the system prompt, and adds a path rule to the first tool result that reads a matching file.
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, getSystemMessageText } from "@earendil-works/pi-ai";
@@ -42,6 +42,10 @@ beforeAll(() => {
       global: {
         rules: [join(rules, "everywhere.md")],
         permissions: { deny: ["read(.env)"], ask: ["bash(git push *)"] },
+        hooks: {
+          tool_result: [{ run: 'echo "HOOK-SAW $PI_FILE"', tools: ["read"], paths: ["src/api/**"] }],
+          agent_before_settle: [{ run: 'test ! -f "$PI_ROOT/needs-fix" || { echo "remove needs-fix" >&2; exit 2; }' }],
+        },
       },
       repos: {
         "example-owner/example-repo": { rules: [join(rules, "api.md")] },
@@ -103,6 +107,7 @@ async function run(responses: Parameters<ReturnType<typeof fauxProvider>["setRes
         .map((message) => getSystemMessageText(message))
         .join("\n"),
       results: session.messages.filter((message) => message.role === "toolResult").map(text),
+      transcript: JSON.stringify(session.messages),
     };
   } finally {
     session.dispose();
@@ -127,6 +132,7 @@ describe("pi applies repo-rules", () => {
     expect(results).toHaveLength(2);
     expect(results[0]).toContain("export const users");
     expect(results[0]).toContain("API-RULE-TEXT");
+    expect(results[0]).toContain(`HOOK-SAW ${join(repo, "src/api/users.ts")}`);
     expect(results[1]).toContain("export const orders");
     expect(results[1]).not.toContain("API-RULE-TEXT");
   });
@@ -145,5 +151,17 @@ describe("pi applies repo-rules", () => {
     expect(results[2]).toContain("bash: git push origin main needs approval");
     expect(results.join("\n")).not.toContain("hunter2");
     expect(results[3]).toContain("allowed");
+  });
+
+  test("a failing agent_before_settle hook gives the model another round", async () => {
+    writeFileSync(join(repo, "needs-fix"), "");
+    const { results, transcript } = await run([
+      fauxAssistantMessage("done"),
+      fauxAssistantMessage(fauxToolCall("bash", { command: "rm needs-fix" }), toolUse),
+      fauxAssistantMessage("done now"),
+    ]);
+    expect(transcript).toContain("remove needs-fix");
+    expect(results).toHaveLength(1);
+    expect(existsSync(join(repo, "needs-fix"))).toBe(false);
   });
 });

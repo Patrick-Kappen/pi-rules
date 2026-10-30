@@ -1,6 +1,6 @@
 # repo-rules
 
-A pi extension that applies rules and permissions per repository. You list them in your own
+A pi extension that applies rules, permissions and hooks per repository. You list them in your own
 configuration, not in the repositories: nothing goes into the repositories themselves.
 
 ## How it works
@@ -22,6 +22,7 @@ configuration, not in the repositories: nothing goes into the repositories thems
    the `codemode` call, which the model sees.
 5. Before every tool call, also the calls of codemode scripts, the permissions decide whether it
    runs: see [Permissions](#permissions).
+6. Hooks run your commands on pi's events: see [Hooks](#hooks).
 
 ## Rules
 
@@ -85,6 +86,50 @@ so `Bash(...)` and `Read(...)` from Claude Code work too.
 Permissions are a guardrail, not a sandbox: a command can still reach a file in a way the rules
 do not see, for example `python -c 'print(open(".env").read())'`.
 
+## Hooks
+
+A hook runs a shell command on one of pi's events:
+
+| Event | When | Output | Exit code 2 |
+|---|---|---|---|
+| `session_start` | A session starts (also `/reload`, `/new`, `/resume`, `/fork`) | stdout goes into the system prompt | — |
+| `before_agent_start` | Every prompt, before the model runs | stdout is added to the context (hidden in the transcript) | — |
+| `tool_call` | Before a tool call, after the permissions | — | Blocks the call; stderr is the reason the model gets |
+| `tool_result` | After a tool call | stdout is added to the tool result | stderr is added to the tool result as a problem |
+| `agent_before_settle` | The model is done | — | The model gets stderr and one more round; at most 3 per prompt |
+| `session_shutdown` | The session ends | — | — |
+
+A hook with another non-zero exit code, or one that times out, is reported to you; pi continues.
+Hooks of one event run one after the other, in the order of the config; on `tool_call`, the first
+exit code 2 stops the rest.
+
+| Field | Meaning |
+|---|---|
+| `run` | The command, run with `sh -c` in the root of the repository (outside git: the working directory). |
+| `tools` | Only for these tools; `*` matches anything. Only on `tool_call` and `tool_result`. |
+| `paths` | Only when the call reads or changes a matching file, with the [globs of rules](#rules). Only on `tool_call` and `tool_result`. |
+| `command` | Only for bash calls with a matching command, with the [command globs of permissions](#permissions). Only on `tool_call` and `tool_result`. |
+| `timeout` | Seconds before the hook is stopped; default 60. |
+
+The command gets the event as JSON on stdin (`event`, `cwd`, `root`, and `tool` with `name` and
+`input`, `result` with `text` and `isError`, or `prompt`, as they apply), and these variables:
+
+| Variable | Value |
+|---|---|
+| `PI_EVENT` | The event |
+| `PI_CWD`, `PI_ROOT` | pi's working directory, and the root of the repository |
+| `PI_TOOL` | The tool of the call |
+| `PI_FILE`, `PI_FILES` | The file of the call (absolute), and all files, one per line |
+| `PI_COMMAND` | The command line of a bash call |
+
+```json
+{
+  "tool_call": [{ "run": "echo 'Commit yourself, not the agent.' >&2; exit 2", "tools": ["bash"], "command": ["git commit *"] }],
+  "tool_result": [{ "run": "biome format --write \"$PI_FILE\"", "tools": ["edit", "write"], "paths": ["**/*.ts"] }],
+  "agent_before_settle": [{ "run": "check >&2 || exit 2", "timeout": 600 }]
+}
+```
+
 ## Configuration
 
 `~/.pi/agent/repo-rules.json` (Home Manager writes this file; see the [main README](../../README.md)):
@@ -93,7 +138,8 @@ do not see, for example `python -c 'print(open(".env").read())'`.
 {
   "global": {
     "rules": ["/nix/store/...-pi-rules/conventional-commits.md"],
-    "permissions": { "deny": ["read(.env)"], "ask": ["bash(git push *)"] }
+    "permissions": { "deny": ["read(.env)"], "ask": ["bash(git push *)"] },
+    "hooks": { "agent_before_settle": [{ "run": "check >&2 || exit 2" }] }
   },
   "repos": {
     "my-org/infra": {
@@ -106,7 +152,7 @@ do not see, for example `python -c 'print(open(".env").read())'`.
 ```
 
 Rule files are absolute paths or `~/...`. A rule listed by several scopes counts once. The
-permissions of all scopes that apply count together.
+permissions and hooks of all scopes that apply count together.
 
 ### `repos` patterns
 
@@ -136,13 +182,15 @@ other rules still apply.
 - the main checkout, the worktree and the normalized remotes
 - for each scope, whether it applies
 - for each rule that applies: always, or its globs, and whether it is in the context
-- the permissions that apply, with their scope
+- the permissions and hooks that apply, with their scope
 
 The rules are read when the session starts. After a change to the config or a rule, run `/reload`.
 
 ## Notes
 
-- Rules are instructions for the model; permissions are what stops a tool call.
+- Rules are instructions for the model; permissions and `tool_call` hooks are what stops a tool
+  call.
+- Hooks run with your permissions, like pi itself. Only configure commands you trust.
 - `match.ts` and `repo.ts` are the same as in `repo-skills`
   ([pi-skills](https://github.com/Patrick-Kappen/pi-skills)) and `repo-mcp`
   ([pi-mcp-servers](https://github.com/Patrick-Kappen/pi-mcp-servers)).
