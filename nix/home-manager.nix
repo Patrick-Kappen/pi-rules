@@ -22,7 +22,41 @@ let
   # A Nix path goes to the store; a string path stays as it is.
   ruleFile = rule: if isName rule then "${cfg.rulesPackage}/${rule}.md" else "${rule}";
 
+  permissionList =
+    action: description:
+    lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      inherit description;
+      example =
+        {
+          deny = [
+            "read(.env)"
+            "read(secrets/**)"
+            "bash(rm -rf *)"
+          ];
+          ask = [
+            "bash(git push *)"
+            "mcp__github__delete_*"
+          ];
+          allow = [ "bash(git push origin feat/*)" ];
+        }
+        .${action};
+    };
+
   scopeModule = {
+    options.permissions = {
+      deny = permissionList "deny" "Tool calls that are blocked. `deny` always wins.";
+      ask = permissionList "ask" ''
+        Tool calls that need your approval: allow once, allow for the session, or deny. Without a UI
+        (print and JSON mode) they are blocked.
+      '';
+      allow = permissionList "allow" ''
+        Exceptions to `ask`: a call that matches `allow` is not asked. Everything that matches no
+        `deny` or `ask` rule is allowed anyway.
+      '';
+    };
+
     options.rules = lib.mkOption {
       type = lib.types.listOf (lib.types.either lib.types.path lib.types.str);
       default = [ ];
@@ -36,7 +70,10 @@ let
     };
   };
 
-  scopeJson = scope: { rules = map ruleFile scope.rules; };
+  scopeJson = scope: {
+    rules = map ruleFile scope.rules;
+    inherit (scope) permissions;
+  };
   allScopes = [
     {
       name = "global";

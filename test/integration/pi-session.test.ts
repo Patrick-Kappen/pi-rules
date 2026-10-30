@@ -39,7 +39,10 @@ beforeAll(() => {
   writeFileSync(
     join(agentDir, "repo-rules.json"),
     JSON.stringify({
-      global: { rules: [join(rules, "everywhere.md")] },
+      global: {
+        rules: [join(rules, "everywhere.md")],
+        permissions: { deny: ["read(.env)"], ask: ["bash(git push *)"] },
+      },
       repos: {
         "example-owner/example-repo": { rules: [join(rules, "api.md")] },
         "someone/else": { rules: [join(rules, "elsewhere.md")] },
@@ -50,6 +53,7 @@ beforeAll(() => {
   mkdirSync(join(repo, "src", "api"), { recursive: true });
   writeFileSync(join(repo, "src", "api", "users.ts"), "export const users = [];\n");
   writeFileSync(join(repo, "src", "api", "orders.ts"), "export const orders = [];\n");
+  writeFileSync(join(repo, ".env"), "SECRET=hunter2\n");
   git(repo, "init");
   git(repo, "remote", "add", "origin", "git@github.com:Example-Owner/example-repo.git");
 
@@ -68,55 +72,78 @@ function text(message: unknown): string {
   return content.map((block: { type: string; text?: string }) => (block.type === "text" ? block.text : "")).join("\n");
 }
 
-describe("pi applies repo-rules", () => {
-  test("global rule in the system prompt, path rule once in the first matching tool result", async () => {
-    const faux = fauxProvider();
-    const modelRuntime = await ModelRuntime.create({
-      authPath: join(root, "auth.json"),
-      modelsPath: null,
-      refreshOnCreate: false,
-    });
-    modelRuntime.registerNativeProvider(faux.provider);
-    faux.setResponses([
-      fauxAssistantMessage(fauxToolCall("read", { path: "src/api/users.ts" }), { stopReason: "toolUse" }),
-      fauxAssistantMessage(fauxToolCall("bash", { command: "cat src/api/orders.ts" }), { stopReason: "toolUse" }),
-      fauxAssistantMessage("done"),
-    ]);
-
-    const resourceLoader = new DefaultResourceLoader({ cwd: repo, agentDir });
-    await resourceLoader.reload();
-    const { session } = await createAgentSession({
-      cwd: repo,
-      agentDir,
-      model: faux.getModel(),
-      modelRuntime,
-      resourceLoader,
-      settingsManager: SettingsManager.inMemory(),
-      sessionManager: SessionManager.inMemory(repo),
-    });
-    try {
-      await session.bindExtensions({});
-      await session.prompt("read the api");
-
+/** Run one prompt in a pi session in the repository, with the model's responses scripted. */
+async function run(responses: Parameters<ReturnType<typeof fauxProvider>["setResponses"]>[0]) {
+  const faux = fauxProvider();
+  const modelRuntime = await ModelRuntime.create({
+    authPath: join(root, "auth.json"),
+    modelsPath: null,
+    refreshOnCreate: false,
+  });
+  modelRuntime.registerNativeProvider(faux.provider);
+  faux.setResponses(responses);
+  const resourceLoader = new DefaultResourceLoader({ cwd: repo, agentDir });
+  await resourceLoader.reload();
+  const { session } = await createAgentSession({
+    cwd: repo,
+    agentDir,
+    model: faux.getModel(),
+    modelRuntime,
+    resourceLoader,
+    settingsManager: SettingsManager.inMemory(),
+    sessionManager: SessionManager.inMemory(repo),
+  });
+  try {
+    await session.bindExtensions({});
+    await session.prompt("go");
+    return {
       // The system prompt the model got: the system messages of the transcript.
-      const system = session.messages
+      system: session.messages
         .filter((message) => message.role === "system")
         .map((message) => getSystemMessageText(message))
-        .join("\n");
-      expect(system).toContain("<repo_rules>");
-      expect(system).toContain("GLOBAL-RULE-TEXT");
-      expect(system).toContain("- api (src/api/**/*.ts)");
-      expect(system).not.toContain("API-RULE-TEXT");
-      expect(system).not.toContain("OTHER-REPO-TEXT");
+        .join("\n"),
+      results: session.messages.filter((message) => message.role === "toolResult").map(text),
+    };
+  } finally {
+    session.dispose();
+  }
+}
 
-      const results = session.messages.filter((message) => message.role === "toolResult").map(text);
-      expect(results).toHaveLength(2);
-      expect(results[0]).toContain("export const users");
-      expect(results[0]).toContain("API-RULE-TEXT");
-      expect(results[1]).toContain("export const orders");
-      expect(results[1]).not.toContain("API-RULE-TEXT");
-    } finally {
-      session.dispose();
-    }
+const toolUse = { stopReason: "toolUse" } as const;
+
+describe("pi applies repo-rules", () => {
+  test("global rule in the system prompt, path rule once in the first matching tool result", async () => {
+    const { system, results } = await run([
+      fauxAssistantMessage(fauxToolCall("read", { path: "src/api/users.ts" }), toolUse),
+      fauxAssistantMessage(fauxToolCall("bash", { command: "cat src/api/orders.ts" }), toolUse),
+      fauxAssistantMessage("done"),
+    ]);
+    expect(system).toContain("<repo_rules>");
+    expect(system).toContain("GLOBAL-RULE-TEXT");
+    expect(system).toContain("- api (src/api/**/*.ts)");
+    expect(system).not.toContain("API-RULE-TEXT");
+    expect(system).not.toContain("OTHER-REPO-TEXT");
+
+    expect(results).toHaveLength(2);
+    expect(results[0]).toContain("export const users");
+    expect(results[0]).toContain("API-RULE-TEXT");
+    expect(results[1]).toContain("export const orders");
+    expect(results[1]).not.toContain("API-RULE-TEXT");
+  });
+
+  test("deny blocks, and ask blocks without a UI", async () => {
+    const { results } = await run([
+      fauxAssistantMessage(fauxToolCall("read", { path: ".env" }), toolUse),
+      fauxAssistantMessage(fauxToolCall("bash", { command: "head -1 .env" }), toolUse),
+      fauxAssistantMessage(fauxToolCall("bash", { command: "git status && git push origin main" }), toolUse),
+      fauxAssistantMessage(fauxToolCall("bash", { command: "echo allowed" }), toolUse),
+      fauxAssistantMessage("done"),
+    ]);
+    expect(results).toHaveLength(4);
+    expect(results[0]).toContain('is denied by deny "read(.env)" (global)');
+    expect(results[1]).toContain('is denied by deny "read(.env)" (global)');
+    expect(results[2]).toContain("bash: git push origin main needs approval");
+    expect(results.join("\n")).not.toContain("hunter2");
+    expect(results[3]).toContain("allowed");
   });
 });
