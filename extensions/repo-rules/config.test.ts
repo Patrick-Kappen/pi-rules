@@ -34,9 +34,9 @@ describe("parseConfig", () => {
     expect(config).toEqual({
       path: "cfg",
       scopes: [
-        { name: "global", pattern: "*", rules: ["/rules/a.md", "/home/u/rules/b.md"] },
-        { name: "owner/repo", pattern: "owner/repo", rules: ["/rules/c.md"] },
-        { name: "~/src", pattern: "~/src", rules: [] },
+        { name: "global", pattern: "*", rules: ["/rules/a.md", "/home/u/rules/b.md"], permissions: [] },
+        { name: "owner/repo", pattern: "owner/repo", rules: ["/rules/c.md"], permissions: [] },
+        { name: "~/src", pattern: "~/src", rules: [], permissions: [] },
       ],
       errors: [],
     });
@@ -60,24 +60,60 @@ describe("parseConfig", () => {
     const config = parseConfig(
       {
         other: true,
-        global: { rules: ["relative.md", 3, "/ok.md"], permissions: {} },
+        global: { rules: ["relative.md", 3, "/ok.md"], hooks: {} },
         repos: { " ": {}, "a/b": "x", "c/d": { rules: "x" } },
       },
       "cfg",
       home,
     );
     expect(config.scopes).toEqual([
-      { name: "global", pattern: "*", rules: ["/ok.md"] },
-      { name: "c/d", pattern: "c/d", rules: [] },
+      { name: "global", pattern: "*", rules: ["/ok.md"], permissions: [] },
+      { name: "c/d", pattern: "c/d", rules: [], permissions: [] },
     ]);
     expect(config.errors).toEqual([
       'cfg: unknown key "other"',
-      'cfg: global: unknown key "permissions"',
+      'cfg: global: unknown key "hooks"',
       'cfg: global: rule "relative.md" is not an absolute path or ~/path',
       "cfg: global: rule 3 is not an absolute path or ~/path",
       "cfg: repos: empty pattern",
       'cfg: repos."a/b": must be an object',
       'cfg: repos."c/d": "rules" must be a list of files',
+    ]);
+  });
+});
+
+describe("permissions", () => {
+  test("deny, ask and allow, in that order", () => {
+    const config = parseConfig(
+      { global: { permissions: { allow: ["bash(npm test)"], ask: ["bash(git push *)"], deny: ["read(.env)"] } } },
+      "cfg",
+      home,
+    );
+    expect(config.errors).toEqual([]);
+    expect(config.scopes[0]?.permissions.map(({ action, text, scope }) => [action, text, scope])).toEqual([
+      ["deny", "read(.env)", "global"],
+      ["ask", "bash(git push *)", "global"],
+      ["allow", "bash(npm test)", "global"],
+    ]);
+  });
+
+  test("invalid permissions are reported, valid ones kept", () => {
+    const config = parseConfig(
+      {
+        global: { permissions: { deny: ["read(", 3, "bash"], ask: "x", maybe: [] } },
+        repos: { "a/b": { permissions: [] } },
+      },
+      "cfg",
+      home,
+    );
+    expect(config.scopes[0]?.permissions.map(({ text }) => text)).toEqual(["bash"]);
+    expect(config.scopes[1]?.permissions).toEqual([]);
+    expect(config.errors).toEqual([
+      'cfg: global: permissions: unknown key "maybe"',
+      'global: deny "read(": expected tool or tool(specifier)',
+      "global: deny 3: not a string",
+      "cfg: global: permissions.ask must be a list",
+      'cfg: repos."a/b": "permissions" must be an object with deny, ask and allow',
     ]);
   });
 });
@@ -96,7 +132,9 @@ describe("loadConfig", () => {
   test("valid file", () => {
     const file = join(dir, "ok.json");
     writeFileSync(file, JSON.stringify({ global: { rules: ["/a.md"] } }));
-    expect(loadConfig(file, home).scopes).toEqual([{ name: "global", pattern: "*", rules: ["/a.md"] }]);
+    expect(loadConfig(file, home).scopes).toEqual([
+      { name: "global", pattern: "*", rules: ["/a.md"], permissions: [] },
+    ]);
   });
 
   test("invalid JSON", () => {

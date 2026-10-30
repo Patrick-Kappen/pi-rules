@@ -1,7 +1,7 @@
 # repo-rules
 
-A pi extension that applies rules per repository. You list the rules in your own configuration, not
-in the repositories: nothing goes into the repositories themselves.
+A pi extension that applies rules and permissions per repository. You list them in your own
+configuration, not in the repositories: nothing goes into the repositories themselves.
 
 ## How it works
 
@@ -20,6 +20,8 @@ in the repositories: nothing goes into the repositories themselves.
    Each rule is added once. After a compaction that removed it from the context, it is added
    again the next time. When a codemode script reads the file, the rule is added to the result of
    the `codemode` call, which the model sees.
+5. Before every tool call, also the calls of codemode scripts, the permissions decide whether it
+   runs: see [Permissions](#permissions).
 
 ## Rules
 
@@ -54,21 +56,57 @@ directory). Symlinked paths match like the real path.
 `paths` may be a block list, an inline list (`paths: ["a", "b"]`) or one string. Other front matter
 keys are ignored. The name of a rule is its file name without `.md`.
 
+## Permissions
+
+Everything is allowed, unless a rule says otherwise:
+
+| List | Effect |
+|---|---|
+| `deny` | The call is blocked; the model gets the reason. `deny` always wins. |
+| `ask` | You are asked: **Allow**, **Allow for this session** (the same rule and the same command or file), or **Deny**. Without a UI (print and JSON mode) the call is blocked. |
+| `allow` | An exception to `ask`: a call that matches `allow` is not asked. It does not override `deny`. |
+
+A rule is a pi tool name, optionally with a specifier in parentheses:
+
+| Rule | Matches |
+|---|---|
+| `bash` | Every bash call |
+| `bash(git push *)` | A command: `*` matches anything, and `cmd *` also matches `cmd` alone. Each command of a line is checked: `a && b`, `a; b`, `a \| b`, `$(...)`, and the script of `bash -c '...'`, without `VAR=x`, `sudo` and `env` in front. |
+| `read(.env)` | Reading a path: `read`, `grep`, `find` and `ls` on that path, and bash commands that print it (`cat .env`). |
+| `edit(flake.lock)` | Changing a path: `edit` and `write`. |
+| `write(dist/**)` | Only the `write` tool. |
+| `grep(...)`, `find(...)`, `ls(...)` | Only that tool, on its `path` (by default the working directory). |
+| `mcp__github__delete_*`, `codemode` | Any other tool, by name; `*` in the name matches anything. |
+
+Paths use the [globs of rules](#rules), relative to the root of the repository. `~/...` and
+`//abs/...` are absolute: `read(~/.ssh/**)`, `read(//etc/**)`. Tool names are not case-sensitive,
+so `Bash(...)` and `Read(...)` from Claude Code work too.
+
+Permissions are a guardrail, not a sandbox: a command can still reach a file in a way the rules
+do not see, for example `python -c 'print(open(".env").read())'`.
+
 ## Configuration
 
 `~/.pi/agent/repo-rules.json` (Home Manager writes this file; see the [main README](../../README.md)):
 
 ```json
 {
-  "global": { "rules": ["/nix/store/...-pi-rules/conventional-commits.md"] },
+  "global": {
+    "rules": ["/nix/store/...-pi-rules/conventional-commits.md"],
+    "permissions": { "deny": ["read(.env)"], "ask": ["bash(git push *)"] }
+  },
   "repos": {
-    "my-org/infra": { "rules": ["~/rules/terraform.md"] },
+    "my-org/infra": {
+      "rules": ["~/rules/terraform.md"],
+      "permissions": { "ask": ["bash(terraform apply *)"], "allow": ["bash(git push origin feat/*)"] }
+    },
     "~/src/project": { "rules": ["/abs/rules/project.md"] }
   }
 }
 ```
 
-Rule files are absolute paths or `~/...`. A rule listed by several scopes counts once.
+Rule files are absolute paths or `~/...`. A rule listed by several scopes counts once. The
+permissions of all scopes that apply count together.
 
 ### `repos` patterns
 
@@ -98,12 +136,13 @@ other rules still apply.
 - the main checkout, the worktree and the normalized remotes
 - for each scope, whether it applies
 - for each rule that applies: always, or its globs, and whether it is in the context
+- the permissions that apply, with their scope
 
 The rules are read when the session starts. After a change to the config or a rule, run `/reload`.
 
 ## Notes
 
-- Rules are instructions for the model; they do not stop it from doing anything.
+- Rules are instructions for the model; permissions are what stops a tool call.
 - `match.ts` and `repo.ts` are the same as in `repo-skills`
   ([pi-skills](https://github.com/Patrick-Kappen/pi-skills)) and `repo-mcp`
   ([pi-mcp-servers](https://github.com/Patrick-Kappen/pi-mcp-servers)).

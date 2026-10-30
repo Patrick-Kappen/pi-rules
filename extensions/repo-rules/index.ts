@@ -1,8 +1,16 @@
 import { homedir } from "node:os";
-import type { ExtensionAPI, ExtensionContext, SessionEntry, ToolResultEvent } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+  SessionEntry,
+  ToolCallEvent,
+  ToolCallEventResult,
+  ToolResultEvent,
+} from "@earendil-works/pi-coding-agent";
 import { configPath, EVERYWHERE, type LoadedConfig, loadConfig, type Scope } from "./config.ts";
 import { filesOfCall, realpathLoose, relativeTo, resolvePath } from "./files.ts";
 import { firstMatch, type MatchContext, normalizeRemote } from "./match.ts";
+import { decide, describeSubject, type Permission, subjectsOf, type Where } from "./permissions.ts";
 import { findRepo } from "./repo.ts";
 import {
   loadRule,
@@ -12,6 +20,11 @@ import {
   renderToolResultRules,
   ruleApplies,
 } from "./rules.ts";
+
+/** The answers to an `ask` rule. */
+export const ALLOW_ONCE = "Allow";
+export const ALLOW_SESSION = "Allow for this session";
+export const DENY = "Deny";
 
 /** The name of the system prompt section with the rules. */
 export const PROMPT_SECTION = "repo_rules";
@@ -37,6 +50,11 @@ export function selectRules(config: LoadedConfig, ctx: MatchContext): { rules: R
     }
   }
   return { rules, errors };
+}
+
+/** The permission rules of the scopes that apply, in the order of the config. */
+export function selectPermissions(config: LoadedConfig, ctx: MatchContext): Permission[] {
+  return config.scopes.filter((scope) => scopeMatches(scope, ctx)).flatMap((scope) => scope.permissions);
 }
 
 /** The rule files whose text is already in the model's context: in a tool result since the last compaction. */
@@ -66,7 +84,11 @@ export type RepoRulesApi = Pick<ExtensionAPI, "on" | "registerCommand">;
 
 interface State {
   root: string;
+  where: Where;
   rules: Rule[];
+  permissions: Permission[];
+  /** `ask` decisions the user allowed for the rest of the session: the rule and what it matched. */
+  approved: Set<string>;
   errors: string[];
   /** Rule files already in the context. */
   delivered: Set<string>;
@@ -85,9 +107,13 @@ export function createRepoRules(pi: RepoRulesApi, options: Options = {}): void {
     const match = matchContext(ctx.cwd);
     const config = loadConfig(file, home);
     const { rules, errors } = selectRules(config, match);
+    const root = match.repo?.worktreeRoot ?? realpathLoose(ctx.cwd);
     return {
-      root: match.repo?.worktreeRoot ?? realpathLoose(ctx.cwd),
+      root,
+      where: { cwd: ctx.cwd, root, home },
       rules,
+      permissions: selectPermissions(config, match),
+      approved: new Set(),
       errors: [...config.errors, ...errors],
       delivered: deliveredRules(ctx.sessionManager.buildContextEntries()),
       pending: new Map(),
@@ -110,6 +136,11 @@ export function createRepoRules(pi: RepoRulesApi, options: Options = {}): void {
   pi.on("before_agent_start", (event) => {
     const section = state && renderPromptSection(state.rules);
     if (section) event.systemPromptOptions.sections[PROMPT_SECTION] = section;
+  });
+
+  pi.on("tool_call", async (event: ToolCallEvent, ctx): Promise<ToolCallEventResult | undefined> => {
+    if (!state || state.permissions.length === 0) return undefined;
+    return checkPermissions(state, event, ctx);
   });
 
   pi.on("tool_result", (event: ToolResultEvent, ctx) => {
@@ -139,11 +170,38 @@ export function createRepoRules(pi: RepoRulesApi, options: Options = {}): void {
   });
 
   pi.registerCommand("repo-rules", {
-    description: "Show which repository pi is in and which repo-rules scopes and rules apply",
+    description: "Show which repository pi is in and which repo-rules scopes, rules and permissions apply",
     handler: async (_args, ctx) => {
       ctx.ui.notify(describe(loadConfig(file, home), matchContext(ctx.cwd), state?.delivered ?? new Set()), "info");
     },
   });
+}
+
+/** Apply the permission rules to a tool call: allow it, block it, or ask the user. */
+async function checkPermissions(
+  state: State,
+  event: ToolCallEvent,
+  ctx: ExtensionContext,
+): Promise<ToolCallEventResult | undefined> {
+  const decision = decide(state.permissions, subjectsOf(event.toolName, event.input, state.where), state.where);
+  if (decision.action === "allow" || !decision.permission) return undefined;
+  const what = describeSubject(event.toolName, decision.subject);
+  const rule = `${decision.permission.action} "${decision.permission.text}" (${decision.permission.scope})`;
+  if (decision.action === "deny") return { block: true, reason: `repo-rules: ${what} is denied by ${rule}.` };
+
+  const key = `${decision.permission.text}\n${what}`;
+  if (state.approved.has(key)) return undefined;
+  if (!ctx.hasUI) {
+    return { block: true, reason: `repo-rules: ${what} needs approval (${rule}), and there is no UI to ask.` };
+  }
+  const choice = await ctx.ui.select(
+    `repo-rules: allow ${what}?\n${rule}`,
+    [ALLOW_ONCE, ALLOW_SESSION, DENY],
+    ctx.signal ? { signal: ctx.signal } : undefined,
+  );
+  if (choice === ALLOW_SESSION) state.approved.add(key);
+  if (choice === ALLOW_ONCE || choice === ALLOW_SESSION) return undefined;
+  return { block: true, reason: `repo-rules: the user did not allow ${what} (${rule}).` };
 }
 
 function describeRepo(match: MatchContext): string[] {
@@ -166,6 +224,9 @@ export function describe(config: LoadedConfig, match: MatchContext, delivered: R
     const when = rule.paths.length === 0 ? "always" : rule.paths.join(", ");
     const loaded = rule.paths.length > 0 && delivered.has(rule.file) ? ", in context" : "";
     lines.push(`  rule ${rule.name} (${rule.scope}): ${when}${loaded}`);
+  }
+  for (const permission of selectPermissions(config, match)) {
+    lines.push(`  ${permission.action} ${permission.text} (${permission.scope})`);
   }
   lines.push(...[...config.errors, ...errors].map((error) => `error: ${error}`));
   lines.push("Changed the config, a rule or the directory? Run /reload.");

@@ -33,9 +33,15 @@ beforeAll(() => {
   writeFileSync(
     configFile,
     JSON.stringify({
-      global: { rules: [join(rules, "always.md"), join(rules, "docs.md")] },
+      global: {
+        rules: [join(rules, "always.md"), join(rules, "docs.md")],
+        permissions: { deny: ["read(.env)"], ask: ["bash(git push *)"] },
+      },
       repos: {
-        "owner/repo": { rules: [join(rules, "api.md"), join(rules, "docs.md"), join(rules, "missing.md")] },
+        "owner/repo": {
+          rules: [join(rules, "api.md"), join(rules, "docs.md"), join(rules, "missing.md")],
+          permissions: { allow: ["bash(git push origin feat/*)"] },
+        },
         "someone/else": { rules: [join(rules, "other.md")] },
       },
     }),
@@ -56,11 +62,14 @@ function load(file = configFile) {
   } as unknown as RepoRulesApi;
   createRepoRules(pi, { env: { PI_REPO_RULES_CONFIG: file }, home: root });
   const notify = vi.fn();
+  const select = vi.fn<(title: string, options: string[], opts?: unknown) => Promise<string | undefined>>();
   let entries: Entry[] = [];
+  let signal: AbortSignal | undefined;
   const ctx = (cwd: string, hasUI = true) => ({
     cwd,
     hasUI,
-    ui: { notify },
+    signal,
+    ui: { notify, select },
     sessionManager: { buildContextEntries: () => entries },
   });
   const emit = (name: string, event: object, cwd = repo, hasUI = true) =>
@@ -82,6 +91,14 @@ function load(file = configFile) {
         { toolCallId: "call-1", toolName, input, content: [{ type: "text", text: "out" }], isError: false, ...extra },
         cwd,
       ) as { content: Array<{ type: string; text: string }>; structuredContent?: unknown } | undefined,
+    call: (toolName: string, input: object, hasUI = true, cwd = repo) =>
+      emit("tool_call", { toolCallId: "call-1", toolName, input }, cwd, hasUI) as Promise<
+        { block: boolean; reason: string } | undefined
+      >,
+    setSignal: (next: AbortSignal | undefined) => {
+      signal = next;
+    },
+    select,
     command: async (cwd = repo) => {
       await command?.("", ctx(cwd));
       return notify.mock.lastCall?.[0] as string;
@@ -217,6 +234,73 @@ describe("tool_result", () => {
   });
 });
 
+describe("tool_call", () => {
+  test("allowed: nothing matches, or allow makes an exception to ask", async () => {
+    const ext = load();
+    ext.start();
+    expect(await ext.call("bash", { command: "npm test" })).toBeUndefined();
+    expect(await ext.call("bash", { command: "git push origin feat/x" })).toBeUndefined();
+    expect(ext.select).not.toHaveBeenCalled();
+  });
+
+  test("denied", async () => {
+    const ext = load();
+    ext.start();
+    const result = await ext.call("bash", { command: "cat .env" });
+    expect(result).toEqual({
+      block: true,
+      reason: `repo-rules: read: ${join(repo, ".env")} is denied by deny "read(.env)" (global).`,
+    });
+  });
+
+  test("ask: allow once", async () => {
+    const ext = load();
+    ext.start();
+    ext.select.mockResolvedValueOnce("Allow");
+    expect(await ext.call("bash", { command: "git push origin main" })).toBeUndefined();
+    expect(ext.select).toHaveBeenCalledWith(
+      'repo-rules: allow bash: git push origin main?\nask "bash(git push *)" (global)',
+      ["Allow", "Allow for this session", "Deny"],
+      undefined,
+    );
+    ext.select.mockResolvedValueOnce("Deny");
+    expect(await ext.call("bash", { command: "git push origin main" })).toEqual({
+      block: true,
+      reason: 'repo-rules: the user did not allow bash: git push origin main (ask "bash(git push *)" (global)).',
+    });
+  });
+
+  test("ask: allow for this session, for the same command only", async () => {
+    const ext = load();
+    ext.start();
+    const controller = new AbortController();
+    ext.setSignal(controller.signal);
+    ext.select.mockResolvedValueOnce("Allow for this session");
+    expect(await ext.call("bash", { command: "git push origin main" })).toBeUndefined();
+    expect(ext.select.mock.lastCall?.[2]).toEqual({ signal: controller.signal });
+    expect(await ext.call("bash", { command: "git push origin main" })).toBeUndefined();
+    expect(ext.select).toHaveBeenCalledTimes(1);
+    ext.select.mockResolvedValueOnce(undefined);
+    expect(await ext.call("bash", { command: "git push origin dev" })).toMatchObject({ block: true });
+  });
+
+  test("ask without a UI blocks", async () => {
+    const ext = load();
+    ext.start();
+    expect(await ext.call("bash", { command: "git push" }, false)).toEqual({
+      block: true,
+      reason: 'repo-rules: bash: git push needs approval (ask "bash(git push *)" (global)), and there is no UI to ask.',
+    });
+  });
+
+  test("before session_start, or without permissions: nothing", async () => {
+    expect(await load().call("bash", { command: "cat .env" })).toBeUndefined();
+    const empty = load(join(root, "missing.json"));
+    empty.start();
+    expect(await empty.call("bash", { command: "cat .env" })).toBeUndefined();
+  });
+});
+
 describe("deliveredRules", () => {
   test("only tool results", () => {
     expect(deliveredRules([])).toEqual(new Set());
@@ -238,6 +322,9 @@ describe("/repo-rules", () => {
     expect(text).toContain("rule always (global): always");
     expect(text).toContain("rule api (owner/repo): src/api/**/*.ts, in context");
     expect(text).toContain("rule docs (global): *.md\n");
+    expect(text).toContain("  deny read(.env) (global)");
+    expect(text).toContain("  ask bash(git push *) (global)");
+    expect(text).toContain("  allow bash(git push origin feat/*) (owner/repo)");
     expect(text).toContain("error: owner/repo: rule");
   });
 
@@ -263,6 +350,7 @@ describe("default export", () => {
       "session_compact",
       "session_tree",
       "before_agent_start",
+      "tool_call",
       "tool_result",
     ]);
     expect(registerCommand).toHaveBeenCalledWith("repo-rules", expect.any(Object));

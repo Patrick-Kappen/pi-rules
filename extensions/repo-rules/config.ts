@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { expandHome } from "./match.ts";
+import { ACTIONS, type Action, type Permission, parsePermission } from "./permissions.ts";
 
 export const CONFIG_FILE = "repo-rules.json";
 
@@ -16,6 +17,8 @@ export interface Scope {
   pattern: string;
   /** Rule files: absolute paths. */
   rules: string[];
+  /** Permission rules, in the order deny, ask, allow. */
+  permissions: Permission[];
 }
 
 export interface LoadedConfig {
@@ -26,7 +29,7 @@ export interface LoadedConfig {
 }
 
 /** The keys a scope may have. */
-const SCOPE_KEYS = new Set(["rules"]);
+const SCOPE_KEYS = new Set(["rules", "permissions"]);
 
 /** pi's agent directory: `$PI_CODING_AGENT_DIR` or `~/.pi/agent`. */
 export function agentDir(env: NodeJS.ProcessEnv = process.env, home: string = homedir()): string {
@@ -73,12 +76,48 @@ function parseScope(
   } else {
     errors.push(`${where}: "rules" must be a list of files`);
   }
-  return { name, pattern, rules };
+  return { name, pattern, rules, permissions: parsePermissions(name, raw.permissions ?? {}, where, errors) };
+}
+
+function parsePermissionList(
+  scope: string,
+  action: Action,
+  list: unknown,
+  where: string,
+  errors: string[],
+): Permission[] {
+  if (!Array.isArray(list)) {
+    errors.push(`${where}: permissions.${action} must be a list`);
+    return [];
+  }
+  const permissions: Permission[] = [];
+  for (const text of list) {
+    const permission =
+      typeof text === "string"
+        ? parsePermission(text, action, scope)
+        : `${scope}: ${action} ${JSON.stringify(text)}: not a string`;
+    if (typeof permission === "string") errors.push(permission);
+    else permissions.push(permission);
+  }
+  return permissions;
+}
+
+/** `{ "deny": [...], "ask": [...], "allow": [...] }` */
+function parsePermissions(scope: string, raw: unknown, where: string, errors: string[]): Permission[] {
+  if (!isRecord(raw)) {
+    errors.push(`${where}: "permissions" must be an object with deny, ask and allow`);
+    return [];
+  }
+  for (const key of Object.keys(raw)) {
+    if (!(ACTIONS as readonly string[]).includes(key)) errors.push(`${where}: permissions: unknown key "${key}"`);
+  }
+  return ACTIONS.flatMap((action) => parsePermissionList(scope, action, raw[action] ?? [], where, errors));
 }
 
 /**
  * Validate the parsed config file. The shape is
- * `{ "global": { "rules": ["/abs/rule.md"] }, "repos": { "owner/repo": { "rules": ["~/rules/x.md"] } } }`.
+ * `{ "global": { "rules": ["/abs/rule.md"], "permissions": { "deny": ["read(.env)"] } },
+ *   "repos": { "owner/repo": { "rules": ["~/rules/x.md"], "permissions": { "ask": ["bash(git push *)"] } } } }`.
  */
 export function parseConfig(raw: unknown, path: string, home: string = homedir()): LoadedConfig {
   const result: LoadedConfig = { path, scopes: [], errors: [] };

@@ -25,7 +25,10 @@ let
       ];
     };
   hm = hmConfig {
-    global.rules = [ "conventional-commits" ];
+    global = {
+      rules = [ "conventional-commits" ];
+      permissions.deny = [ "read(.env)" ];
+    };
     # A rule from elsewhere, by Nix path.
     repos."Patrick-Kappen/*".rules = [ ../test/nix/api.md ];
   };
@@ -51,7 +54,8 @@ in
         test -f "$homeFiles/$agent/extensions/repo-rules/index.ts"
         test ! -e "$homeFiles/$agent/extensions/repo-rules/index.test.ts"
         jq -e --arg rule "${packages.rules}/conventional-commits.md" \
-          '.global == { rules: [$rule] }' "$homeFiles/$agent/repo-rules.json"
+          '.global == { rules: [$rule], permissions: { deny: ["read(.env)"], ask: [], allow: [] } }' \
+          "$homeFiles/$agent/repo-rules.json"
         test -f "$(jq -r '.repos."Patrick-Kappen/*".rules[0]' "$homeFiles/$agent/repo-rules.json")"
         cp "$smoke" smoke.ts
         node smoke.ts "$homeFiles" "$agent"

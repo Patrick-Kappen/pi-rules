@@ -22,8 +22,8 @@ function repo(remote: string): string {
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
 
-/** The system prompt section and the text added to a read of src/api/users.ts. */
-function rulesIn(cwd: string): { section: string; added: string } {
+/** The system prompt section, the text added to a read of src/api/users.ts, and the decision on reading .env. */
+async function rulesIn(cwd: string): Promise<{ section: string; added: string; blocked: boolean }> {
   const handlers = new Map<string, Handler>();
   const pi = {
     on: (name: string, handler: Handler) => handlers.set(name, handler),
@@ -38,7 +38,15 @@ function rulesIn(cwd: string): { section: string; added: string } {
     { type: "tool_result", toolCallId: "1", toolName: "read", input: { path: "src/api/users.ts" }, content: [] },
     ctx,
   ) as { content: Array<{ text: string }> } | undefined;
-  return { section: start.systemPromptOptions.sections.repo_rules ?? "", added: result?.content[0]?.text ?? "" };
+  const call = (await handlers.get("tool_call")?.(
+    { type: "tool_call", toolCallId: "2", toolName: "read", input: { path: ".env" } },
+    ctx,
+  )) as { block?: boolean } | undefined;
+  return {
+    section: start.systemPromptOptions.sections.repo_rules ?? "",
+    added: result?.content[0]?.text ?? "",
+    blocked: call?.block === true,
+  };
 }
 
 const cases: Array<[string, boolean]> = [
@@ -46,8 +54,9 @@ const cases: Array<[string, boolean]> = [
   ["https://github.com/someone/else", false],
 ];
 for (const [remote, inScope] of cases) {
-  const { section, added } = rulesIn(repo(remote));
+  const { section, added, blocked } = await rulesIn(repo(remote));
   if (!section.includes("Conventional Commits")) throw new Error(`${remote}: no global rule in ${section}`);
   if (added.includes("API-RULE-TEXT") !== inScope) throw new Error(`${remote}: unexpected tool result: ${added}`);
+  if (!blocked) throw new Error(`${remote}: reading .env was not denied`);
   process.stdout.write(`ok ${remote}\n`);
 }

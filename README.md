@@ -11,6 +11,8 @@ in [pi-skills](https://github.com/Patrick-Kappen/pi-skills) and `repo-mcp` in
 - **Rules**: Markdown instructions. A rule without `paths` goes into the system prompt; a rule with
   `paths` globs is added when pi reads or changes a matching file, like the path-specific rules of
   Claude Code.
+- **Permissions**: `deny`, `ask` and `allow` rules for tool calls, such as `read(.env)` or
+  `bash(git push *)`. Everything else is allowed.
 
 | Rule | What it says |
 |---|---|
@@ -37,11 +39,18 @@ in [pi-skills](https://github.com/Patrick-Kappen/pi-skills) and `repo-mcp` in
     enable = true;
 
     # Everywhere, also outside git repositories.
-    global.rules = [ "conventional-commits" ];
+    global = {
+      rules = [ "conventional-commits" ];
+      permissions = {
+        deny = [ "read(.env)" "read(secrets/**)" "read(~/.ssh/**)" ];
+        ask = [ "bash(git push *)" ];
+      };
+    };
 
     # Per repository, on top of global.
     repos."my-org/infra".rules = [ ./rules/terraform.md ];   # a rule from your own configuration
     repos."my-org/*".rules = [ "conventional-commits" ];     # every repository of an owner
+    repos."my-org/*".permissions.allow = [ "bash(git push origin feat/*)" ];   # no question for these
     repos."~/src/project".rules = [ "~/rules/project.md" ];  # a directory; a file outside the store
   };
 }
@@ -53,7 +62,9 @@ The module installs the extension in `~/.pi/agent/extensions/repo-rules` and wri
 | Option | Default | Meaning |
 |---|---|---|
 | `global.rules` | `[ ]` | Rules that apply everywhere. |
+| `global.permissions.{deny,ask,allow}` | `[ ]` | Permission rules that apply everywhere. See the [extension README](extensions/repo-rules/README.md#permissions). |
 | `repos.<pattern>.rules` | `[ ]` | Rules for the repositories that match: `owner/repo`, `host/owner/repo`, `owner/*`, a path such as `~/src/project`, or `*`. See the [extension README](extensions/repo-rules/README.md#repos-patterns). |
+| `repos.<pattern>.permissions.{deny,ask,allow}` | `[ ]` | Permission rules for those repositories, on top of `global`. |
 | `package` | `packages.<system>.repo-rules` | The extension. |
 | `rulesPackage` | `packages.<system>.rules` | The rules of this flake. |
 | `agentDir` | `.pi/agent` | pi's agent directory relative to home. |
@@ -61,7 +72,7 @@ The module installs the extension in `~/.pi/agent/extensions/repo-rules` and wri
 A rule entry is the name of a rule of this flake, a Nix path (copied to the store), or an absolute
 path or `~/path` (read as it is, so you can change it without a rebuild).
 
-In pi, `/repo-rules` shows which scopes and rules apply to the current repository. After changing
+In pi, `/repo-rules` shows which scopes, rules and permissions apply to the current repository. After changing
 the configuration or a rule, run `/reload` in pi.
 
 ## Writing a rule
