@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import { type Hook, parseHooks } from "./hooks.ts";
 import { expandHome } from "./match.ts";
 import { ACTIONS, type Action, type Permission, parsePermission } from "./permissions.ts";
 
@@ -19,6 +20,7 @@ export interface Scope {
   rules: string[];
   /** Permission rules, in the order deny, ask, allow. */
   permissions: Permission[];
+  hooks: Hook[];
 }
 
 export interface LoadedConfig {
@@ -29,7 +31,7 @@ export interface LoadedConfig {
 }
 
 /** The keys a scope may have. */
-const SCOPE_KEYS = new Set(["rules", "permissions"]);
+const SCOPE_KEYS = new Set(["rules", "permissions", "hooks"]);
 
 /** pi's agent directory: `$PI_CODING_AGENT_DIR` or `~/.pi/agent`. */
 export function agentDir(env: NodeJS.ProcessEnv = process.env, home: string = homedir()): string {
@@ -76,7 +78,13 @@ function parseScope(
   } else {
     errors.push(`${where}: "rules" must be a list of files`);
   }
-  return { name, pattern, rules, permissions: parsePermissions(name, raw.permissions ?? {}, where, errors) };
+  return {
+    name,
+    pattern,
+    rules,
+    permissions: parsePermissions(name, raw.permissions ?? {}, where, errors),
+    hooks: parseHooks(raw.hooks, name, errors),
+  };
 }
 
 function parsePermissionList(

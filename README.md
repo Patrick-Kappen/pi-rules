@@ -13,6 +13,8 @@ in [pi-skills](https://github.com/Patrick-Kappen/pi-skills) and `repo-mcp` in
   Claude Code.
 - **Permissions**: `deny`, `ask` and `allow` rules for tool calls, such as `read(.env)` or
   `bash(git push *)`. Everything else is allowed.
+- **Hooks**: your commands on pi's events, such as formatting a file after an edit, blocking
+  `git commit`, or running the checks before the model finishes.
 
 | Rule | What it says |
 |---|---|
@@ -51,6 +53,13 @@ in [pi-skills](https://github.com/Patrick-Kappen/pi-skills) and `repo-mcp` in
     repos."my-org/infra".rules = [ ./rules/terraform.md ];   # a rule from your own configuration
     repos."my-org/*".rules = [ "conventional-commits" ];     # every repository of an owner
     repos."my-org/*".permissions.allow = [ "bash(git push origin feat/*)" ];   # no question for these
+
+    # Hooks on pi's events.
+    repos."~/src/project".hooks = {
+      tool_result = [ { run = ''biome format --write "$PI_FILE"''; tools = [ "edit" "write" ]; paths = [ "**/*.ts" ]; } ];
+      tool_call = [ { run = "echo 'Commit yourself.' >&2; exit 2"; tools = [ "bash" ]; command = [ "git commit *" ]; } ];
+      agent_before_settle = [ { run = "check >&2 || exit 2"; timeout = 600; } ];
+    };
     repos."~/src/project".rules = [ "~/rules/project.md" ];  # a directory; a file outside the store
   };
 }
@@ -65,6 +74,7 @@ The module installs the extension in `~/.pi/agent/extensions/repo-rules` and wri
 | `global.permissions.{deny,ask,allow}` | `[ ]` | Permission rules that apply everywhere. See the [extension README](extensions/repo-rules/README.md#permissions). |
 | `repos.<pattern>.rules` | `[ ]` | Rules for the repositories that match: `owner/repo`, `host/owner/repo`, `owner/*`, a path such as `~/src/project`, or `*`. See the [extension README](extensions/repo-rules/README.md#repos-patterns). |
 | `repos.<pattern>.permissions.{deny,ask,allow}` | `[ ]` | Permission rules for those repositories, on top of `global`. |
+| `global.hooks.<event>`, `repos.<pattern>.hooks.<event>` | `[ ]` | Hooks: `{ run; tools; paths; command; timeout; }` on `session_start`, `before_agent_start`, `tool_call`, `tool_result`, `agent_before_settle` or `session_shutdown`. See the [extension README](extensions/repo-rules/README.md#hooks). |
 | `package` | `packages.<system>.repo-rules` | The extension. |
 | `rulesPackage` | `packages.<system>.rules` | The rules of this flake. |
 | `agentDir` | `.pi/agent` | pi's agent directory relative to home. |
@@ -72,7 +82,8 @@ The module installs the extension in `~/.pi/agent/extensions/repo-rules` and wri
 A rule entry is the name of a rule of this flake, a Nix path (copied to the store), or an absolute
 path or `~/path` (read as it is, so you can change it without a rebuild).
 
-In pi, `/repo-rules` shows which scopes, rules and permissions apply to the current repository. After changing
+In pi, `/repo-rules` shows which scopes, rules, permissions and hooks apply to the current
+repository. After changing
 the configuration or a rule, run `/reload` in pi.
 
 ## Writing a rule

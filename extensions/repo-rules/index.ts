@@ -1,16 +1,33 @@
 import { homedir } from "node:os";
 import type {
+  AgentBeforeSettleEvent,
+  BeforeAgentStartEvent,
+  BeforeAgentStartEventResult,
+  BoundaryResult,
   ExtensionAPI,
   ExtensionContext,
   SessionEntry,
   ToolCallEvent,
   ToolCallEventResult,
   ToolResultEvent,
+  ToolResultEventResult,
 } from "@earendil-works/pi-coding-agent";
 import { configPath, EVERYWHERE, type LoadedConfig, loadConfig, type Scope } from "./config.ts";
 import { filesOfCall, realpathLoose, relativeTo, resolvePath } from "./files.ts";
+import {
+  BLOCK_EXIT_CODE,
+  blockMessage,
+  clip,
+  describeFailure,
+  type Hook,
+  type HookEvent,
+  type HookRun,
+  hookApplies,
+  runHook,
+  type ToolFacts,
+} from "./hooks.ts";
 import { firstMatch, type MatchContext, normalizeRemote } from "./match.ts";
-import { decide, describeSubject, type Permission, subjectsOf, type Where } from "./permissions.ts";
+import { commandsOf, decide, describeSubject, type Permission, subjectsOf, type Where } from "./permissions.ts";
 import { findRepo } from "./repo.ts";
 import {
   loadRule,
@@ -28,6 +45,10 @@ export const DENY = "Deny";
 
 /** The name of the system prompt section with the rules. */
 export const PROMPT_SECTION = "repo_rules";
+/** The custom type of the messages the extension adds. */
+export const MESSAGE_TYPE = "repo-rules";
+/** How many extra rounds failing `agent_before_settle` hooks may start for one prompt. */
+export const MAX_SETTLE_ROUNDS = 3;
 
 /** Whether a scope applies to the session: global always, a `repos` pattern when it matches. */
 export function scopeMatches(scope: Scope, ctx: MatchContext): boolean {
@@ -55,6 +76,11 @@ export function selectRules(config: LoadedConfig, ctx: MatchContext): { rules: R
 /** The permission rules of the scopes that apply, in the order of the config. */
 export function selectPermissions(config: LoadedConfig, ctx: MatchContext): Permission[] {
   return config.scopes.filter((scope) => scopeMatches(scope, ctx)).flatMap((scope) => scope.permissions);
+}
+
+/** The hooks of the scopes that apply, in the order of the config. */
+export function selectHooks(config: LoadedConfig, ctx: MatchContext): Hook[] {
+  return config.scopes.filter((scope) => scopeMatches(scope, ctx)).flatMap((scope) => scope.hooks);
 }
 
 /** The rule files whose text is already in the model's context: in a tool result since the last compaction. */
@@ -87,13 +113,121 @@ interface State {
   where: Where;
   rules: Rule[];
   permissions: Permission[];
+  hooks: Hook[];
   /** `ask` decisions the user allowed for the rest of the session: the rule and what it matched. */
   approved: Set<string>;
   errors: string[];
   /** Rule files already in the context. */
   delivered: Set<string>;
-  /** Rules found in nested calls (codemode), added to the result of the call the model made. */
-  pending: Map<string, Rule[]>;
+  /** Text for the result of the call the model made, from its nested calls (codemode). */
+  pending: Map<string, string[]>;
+  /** The output of the session_start hooks, for the system prompt. */
+  startOutput: string[];
+  /** Rounds started by failing agent_before_settle hooks since the last prompt. */
+  settleRounds: number;
+}
+
+/** What a tool call is about: its files (absolute and relative to the root) and its bash commands. */
+interface CallFacts extends ToolFacts {
+  files: string[];
+  /** The command line of a bash call, else empty. */
+  command: string;
+}
+
+function callFacts(state: State, toolName: string, input: Record<string, unknown>, cwd: string): CallFacts {
+  const files = filesOfCall(toolName, input).map((path) => resolvePath(path, cwd, state.where.home));
+  const relative = files.map((path) => relativeTo(state.root, path)).filter((path) => path !== undefined);
+  const command = toolName === "bash" && typeof input.command === "string" ? input.command : "";
+  return { toolName, files, relative, commands: command === "" ? [] : commandsOf(command), command };
+}
+
+function warn(ctx: ExtensionContext, text: string): void {
+  if (ctx.hasUI) ctx.ui.notify(text, "warning");
+}
+
+/**
+ * Run the hooks of an event one after the other, in the root of the repository. Failures other than
+ * exit code 2 are reported to the user. With `stopOnBlock`, the first exit code 2 ends the run.
+ */
+async function runHooks(
+  state: State,
+  event: HookEvent,
+  ctx: ExtensionContext,
+  details: { facts?: CallFacts; input?: Record<string, unknown>; stopOnBlock?: boolean } = {},
+): Promise<HookRun[]> {
+  const runs: HookRun[] = [];
+  const { facts } = details;
+  const env: Record<string, string> = {
+    PI_EVENT: event,
+    PI_CWD: state.where.cwd,
+    PI_ROOT: state.root,
+    PI_TOOL: facts?.toolName ?? "",
+    PI_FILE: facts?.files[0] ?? "",
+    PI_FILES: facts?.files.join("\n") ?? "",
+    PI_COMMAND: facts?.command ?? "",
+  };
+  const input = { event, cwd: state.where.cwd, root: state.root, ...details.input };
+  for (const hook of state.hooks) {
+    if (!hookApplies(hook, event, facts)) continue;
+    const run = await runHook(hook, { cwd: state.root, env, input, signal: ctx.signal });
+    runs.push(run);
+    if (run.code !== 0 && run.code !== BLOCK_EXIT_CODE) warn(ctx, describeFailure(run));
+    if (details.stopOnBlock && run.code === BLOCK_EXIT_CODE) break;
+  }
+  return runs;
+}
+
+/** The text for a tool result from the tool_result hooks: their output, and the problems they report. */
+function hookTexts(runs: readonly HookRun[]): string[] {
+  const texts: string[] = [];
+  for (const run of runs) {
+    if (run.code === 0 && run.stdout.trim() !== "") {
+      texts.push(`Output of the repo-rules hook "${run.hook.run}":\n${clip(run.stdout)}`);
+    } else if (run.code === BLOCK_EXIT_CODE) {
+      texts.push(`The repo-rules hook "${run.hook.run}" reports a problem:\n${blockMessage(run)}`);
+    }
+  }
+  return texts;
+}
+
+/** The system prompt section: the rules, and the output of the session_start hooks. */
+function promptSection(state: State): string | undefined {
+  const parts = [renderPromptSection(state.rules)];
+  if (state.startOutput.length > 0) {
+    parts.push(`Output of the session_start hooks of repo-rules:\n\n${state.startOutput.join("\n\n")}`);
+  }
+  const text = parts.filter((part) => part !== undefined).join("\n\n");
+  return text === "" ? undefined : text;
+}
+
+/** The text for the path rules that apply to the files of a call and are not in the context yet. */
+function dueRules(state: State, facts: CallFacts): string[] {
+  const due = state.rules.filter(
+    (rule) => !state.delivered.has(rule.file) && facts.relative.some((path) => ruleApplies(rule, path)),
+  );
+  for (const rule of due) state.delivered.add(rule.file);
+  return due.length > 0 ? [renderToolResultRules(due, facts.relative)] : [];
+}
+
+/**
+ * Add texts to a tool result. The result of a nested call (codemode) goes to the calling tool, not to
+ * the model, so its texts wait for the result of the call the model made.
+ */
+function addToResult(state: State, event: ToolResultEvent, texts: string[]): ToolResultEventResult | undefined {
+  if (event.parentToolCallId !== undefined) {
+    const id = topLevelCallId(event.toolCallId);
+    if (texts.length > 0) state.pending.set(id, [...(state.pending.get(id) ?? []), ...texts]);
+    return undefined;
+  }
+  const all = [...(state.pending.get(event.toolCallId) ?? []), ...texts];
+  state.pending.delete(event.toolCallId);
+  if (all.length === 0) return undefined;
+  const content = [...event.content, { type: "text" as const, text: all.join("\n\n") }];
+  return event.structuredContent === undefined ? { content } : { content, structuredContent: event.structuredContent };
+}
+
+function resultText(event: ToolResultEvent): string {
+  return event.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
 }
 
 export function createRepoRules(pi: RepoRulesApi, options: Options = {}): void {
@@ -113,17 +247,29 @@ export function createRepoRules(pi: RepoRulesApi, options: Options = {}): void {
       where: { cwd: ctx.cwd, root, home },
       rules,
       permissions: selectPermissions(config, match),
+      hooks: selectHooks(config, match),
       approved: new Set(),
       errors: [...config.errors, ...errors],
       delivered: deliveredRules(ctx.sessionManager.buildContextEntries()),
       pending: new Map(),
+      startOutput: [],
+      settleRounds: 0,
     };
   };
 
   // Runs at startup, on /reload, /new, /resume and /fork: the config and the rules are read again.
-  pi.on("session_start", (_event, ctx) => {
-    state = load(ctx);
-    if (state.errors.length > 0 && ctx.hasUI) ctx.ui.notify(`repo-rules:\n${state.errors.join("\n")}`, "warning");
+  pi.on("session_start", async (_event, ctx) => {
+    const current = load(ctx);
+    state = current;
+    if (current.errors.length > 0) warn(ctx, `repo-rules:\n${current.errors.join("\n")}`);
+    const runs = await runHooks(current, "session_start", ctx);
+    current.startOutput = runs
+      .filter((run) => run.code === 0 && run.stdout.trim() !== "")
+      .map((run) => clip(run.stdout));
+  });
+
+  pi.on("session_shutdown", async (_event, ctx) => {
+    if (state) await runHooks(state, "session_shutdown", ctx);
   });
 
   // After a compaction or a move in the tree, rules that left the context are added again when needed.
@@ -133,44 +279,68 @@ export function createRepoRules(pi: RepoRulesApi, options: Options = {}): void {
   pi.on("session_compact", refresh);
   pi.on("session_tree", refresh);
 
-  pi.on("before_agent_start", (event) => {
-    const section = state && renderPromptSection(state.rules);
-    if (section) event.systemPromptOptions.sections[PROMPT_SECTION] = section;
-  });
+  pi.on(
+    "before_agent_start",
+    async (event: BeforeAgentStartEvent, ctx): Promise<BeforeAgentStartEventResult | undefined> => {
+      if (!state) return undefined;
+      if (event.messageType === "user") state.settleRounds = 0;
+      const section = promptSection(state);
+      if (section) event.systemPromptOptions.sections[PROMPT_SECTION] = section;
+      const input = event.messageType === "user" ? { prompt: event.prompt } : {};
+      const runs = await runHooks(state, "before_agent_start", ctx, { input });
+      const output = runs.filter((run) => run.code === 0 && run.stdout.trim() !== "").map((run) => clip(run.stdout));
+      if (output.length === 0) return undefined;
+      return { message: { customType: MESSAGE_TYPE, content: output.join("\n\n"), display: false } };
+    },
+  );
 
   pi.on("tool_call", async (event: ToolCallEvent, ctx): Promise<ToolCallEventResult | undefined> => {
-    if (!state || state.permissions.length === 0) return undefined;
-    return checkPermissions(state, event, ctx);
+    if (!state) return undefined;
+    if (state.permissions.length > 0) {
+      const decision = await checkPermissions(state, event, ctx);
+      if (decision) return decision;
+    }
+    const facts = callFacts(state, event.toolName, event.input, ctx.cwd);
+    const input = { tool: { name: event.toolName, input: event.input } };
+    const runs = await runHooks(state, "tool_call", ctx, { facts, input, stopOnBlock: true });
+    const blocked = runs.find((run) => run.code === BLOCK_EXIT_CODE);
+    if (!blocked) return undefined;
+    return { block: true, reason: `repo-rules hook "${blocked.hook.run}": ${blockMessage(blocked)}` };
   });
 
-  pi.on("tool_result", (event: ToolResultEvent, ctx) => {
+  pi.on("tool_result", async (event: ToolResultEvent, ctx): Promise<ToolResultEventResult | undefined> => {
     if (!state) return undefined;
-    const current = state;
-    const files = filesOfCall(event.toolName, event.input).map((path) => resolvePath(path, ctx.cwd, home));
-    const relative = files.map((path) => relativeTo(current.root, path)).filter((path) => path !== undefined);
-    const due = current.rules.filter(
-      (rule) => !current.delivered.has(rule.file) && relative.some((path) => ruleApplies(rule, path)),
-    );
-    for (const rule of due) current.delivered.add(rule.file);
+    const facts = callFacts(state, event.toolName, event.input, ctx.cwd);
+    const input = {
+      tool: { name: event.toolName, input: event.input },
+      result: { text: resultText(event), isError: event.isError },
+    };
+    const runs = await runHooks(state, "tool_result", ctx, { facts, input });
+    return addToResult(state, event, [...dueRules(state, facts), ...hookTexts(runs)]);
+  });
 
-    if (event.parentToolCallId !== undefined) {
-      // The result of a nested call goes to the calling tool, not to the model.
-      const id = topLevelCallId(event.toolCallId);
-      if (due.length > 0) current.pending.set(id, [...(current.pending.get(id) ?? []), ...due]);
+  pi.on("agent_before_settle", async (event: AgentBeforeSettleEvent, ctx): Promise<BoundaryResult | undefined> => {
+    if (!state || event.outcome !== "completed") return undefined;
+    const runs = await runHooks(state, "agent_before_settle", ctx);
+    const failed = runs.filter((run) => run.code === BLOCK_EXIT_CODE);
+    if (failed.length === 0) return undefined;
+    if (state.settleRounds >= MAX_SETTLE_ROUNDS) {
+      warn(ctx, `repo-rules: agent_before_settle hooks still fail after ${MAX_SETTLE_ROUNDS} extra rounds; stopping.`);
       return undefined;
     }
-    const rules = [...(current.pending.get(event.toolCallId) ?? []), ...due];
-    current.pending.delete(event.toolCallId);
-    if (rules.length === 0) return undefined;
-    const text = renderToolResultRules(rules, relative);
-    const content = [...event.content, { type: "text" as const, text }];
-    return event.structuredContent === undefined
-      ? { content }
-      : { content, structuredContent: event.structuredContent };
+    state.settleRounds++;
+    const content = [
+      "A repo-rules hook reports problems before you finish. Fix them, then finish.",
+      ...failed.map((run) => `Hook "${run.hook.run}":\n${blockMessage(run)}`),
+    ].join("\n\n");
+    return {
+      entries: [...event.entries, { type: "custom_message", customType: MESSAGE_TYPE, content, display: true }],
+      continue: true,
+    };
   });
 
   pi.registerCommand("repo-rules", {
-    description: "Show which repository pi is in and which repo-rules scopes, rules and permissions apply",
+    description: "Show which repository pi is in and which repo-rules scopes, rules, permissions and hooks apply",
     handler: async (_args, ctx) => {
       ctx.ui.notify(describe(loadConfig(file, home), matchContext(ctx.cwd), state?.delivered ?? new Set()), "info");
     },
@@ -212,7 +382,17 @@ function describeRepo(match: MatchContext): string[] {
   return lines;
 }
 
-/** The text of `/repo-rules`: where pi is, which scopes apply, and their rules. */
+function describeHook(hook: Hook): string {
+  const filters = [
+    hook.tools.length > 0 ? `tools: ${hook.tools.join(", ")}` : "",
+    hook.paths.length > 0 ? `paths: ${hook.paths.join(", ")}` : "",
+    hook.commands.length > 0 ? `command: ${hook.commands.join(", ")}` : "",
+  ].filter((filter) => filter !== "");
+  const when = filters.length > 0 ? ` [${filters.join("; ")}]` : "";
+  return `  hook ${hook.event}${when}: ${hook.run} (${hook.scope})`;
+}
+
+/** The text of `/repo-rules`: where pi is, which scopes apply, and their rules, permissions and hooks. */
 export function describe(config: LoadedConfig, match: MatchContext, delivered: ReadonlySet<string>): string {
   const lines = [`config: ${config.path}`, `cwd: ${match.cwd}`, ...describeRepo(match)];
   if (config.scopes.length === 0) lines.push("no scopes configured");
@@ -228,6 +408,7 @@ export function describe(config: LoadedConfig, match: MatchContext, delivered: R
   for (const permission of selectPermissions(config, match)) {
     lines.push(`  ${permission.action} ${permission.text} (${permission.scope})`);
   }
+  lines.push(...selectHooks(config, match).map(describeHook));
   lines.push(...[...config.errors, ...errors].map((error) => `error: ${error}`));
   lines.push("Changed the config, a rule or the directory? Run /reload.");
   return lines.join("\n");
