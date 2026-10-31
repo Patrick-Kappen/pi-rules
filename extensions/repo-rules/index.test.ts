@@ -103,6 +103,10 @@ function load(file = configFile) {
       await command?.("", ctx(cwd));
       return notify.mock.lastCall?.[0] as string;
     },
+    allow: async () => {
+      await command?.("allow", ctx(repo));
+      return notify.mock.lastCall?.[0] as string;
+    },
     notify,
   };
 }
@@ -249,7 +253,7 @@ describe("tool_call", () => {
     const result = await ext.call("bash", { command: "cat .env" });
     expect(result).toEqual({
       block: true,
-      reason: `repo-rules: read: ${join(repo, ".env")} is denied by deny "read(.env)" (global).`,
+      reason: `repo-rules: read: ${join(repo, ".env")} is denied by deny "read(.env)" (global). The user can allow it once with /repo-rules allow.`,
     });
   });
 
@@ -289,7 +293,8 @@ describe("tool_call", () => {
     await ext.start();
     expect(await ext.call("bash", { command: "git push" }, false)).toEqual({
       block: true,
-      reason: 'repo-rules: bash: git push needs approval (ask "bash(git push *)" (global)), and there is no UI to ask.',
+      reason:
+        'repo-rules: bash: git push needs approval (ask "bash(git push *)" (global)), and there is no UI to ask. The user can allow it once with /repo-rules allow.',
     });
   });
 
@@ -516,5 +521,21 @@ describe("hooks", () => {
       '  hook tool_result [tools: edit, write; paths: **/*.ts]: echo "formatted $PI_FILE" (global)',
     );
     expect(text).toContain("  hook tool_call [tools: bash; command: git commit *]: echo never (global)");
+  });
+
+  test("/repo-rules allow lets the last blocked call through once", async () => {
+    const ext = load();
+    await ext.start();
+    const read = () => ext.call("bash", { command: "cat .env" });
+    expect(await ext.allow()).toBe("repo-rules: nothing was blocked in this session");
+    expect(await read()).toMatchObject({ block: true });
+    expect(await ext.allow()).toBe(
+      `repo-rules: allowed once: read: ${join(repo, ".env")} (deny "read(.env)" (global))`,
+    );
+    expect(await read()).toBeUndefined();
+    expect(await read()).toMatchObject({ block: true });
+    expect(await ext.call("bash", { command: "git push" }, false)).toMatchObject({ block: true });
+    await ext.allow();
+    expect(await ext.call("bash", { command: "git push" }, false)).toBeUndefined();
   });
 });

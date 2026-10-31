@@ -44,7 +44,7 @@ in [pi-skills](https://github.com/Patrick-Kappen/pi-skills) and `repo-mcp` in
     global = {
       rules = [ "conventional-commits" ];
       permissions = {
-        deny = [ "read(.env)" "read(secrets/**)" "read(~/.ssh/**)" ];
+        deny = [ "read(.env)" "read(secrets/**)" "read(~/.ssh/**)" "edit(@main)" ];   # edit(@main): only in worktrees
         ask = [ "bash(git push *)" ];
       };
     };
