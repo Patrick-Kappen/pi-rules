@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/Patrick-Kappen/pi-rules/compare/v0.1.1...v0.2.0) (2026-10-31)
+
+
+### Features
+
+* **repo-rules:** protect main and allow blocked calls once ([#8](https://github.com/Patrick-Kappen/pi-rules/issues/8)) ([b84c3a5](https://github.com/Patrick-Kappen/pi-rules/commit/b84c3a5c99ae36a624ce884782c7fc768a4aefc9))
+
 ## [0.1.1](https://github.com/Patrick-Kappen/pi-rules/compare/v0.1.0...v0.1.1) (2026-10-31)
 
 
