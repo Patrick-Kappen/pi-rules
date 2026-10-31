@@ -5,7 +5,7 @@ export default defineConfig({
     // Hooks run inside git; its variables would point git calls in tests at this repository.
     env: { GIT_DIR: "", GIT_INDEX_FILE: "", GIT_WORK_TREE: "" },
     projects: [
-      { test: { name: "unit", include: ["extensions/**/*.test.ts"] } },
+      { test: { name: "unit", include: ["extensions/**/*.test.ts", "hooks/**/*.test.ts"] } },
       {
         test: {
           name: "integration",

@@ -133,10 +133,67 @@ let
     };
   };
 
-  scopeJson = scope: {
+  # Commands that may run a test tool; hooks/test-changed.sh decides for the rest of the line.
+  testCommands = [
+    "pytest *"
+    "py.test *"
+    "python -m pytest *"
+    "python3 -m pytest *"
+    "vitest *"
+    "jest *"
+    "Invoke-Pester *"
+    "bun test *"
+    "npm test *"
+    "npm run test *"
+    "pnpm test *"
+    "pnpm run test *"
+    "yarn test *"
+    "yarn run test *"
+    "go test *"
+    "cargo test *"
+    "dotnet test *"
+    "pwsh *"
+    "powershell *"
+    "npx *"
+    "bunx *"
+    "uv run *"
+    "poetry run *"
+    "timeout *"
+    "time *"
+    "devenv shell *"
+    "nix develop *"
+  ];
+  testChangedRun = "${cfg.hooksPackage}/test-changed.sh";
+  testChangedHooks = lib.optionalAttrs cfg.testChanged.enable {
+    tool_call = [
+      {
+        # The recipe gets the hook's time minus a margin, so its own timeout reports first.
+        run = "TEST_CHANGED_TIMEOUT=${
+          toString (lib.max 10 (cfg.testChanged.timeout - 30))
+        } ${testChangedRun}";
+        tools = [ "bash" ];
+        paths = [ ];
+        command = testCommands;
+        inherit (cfg.testChanged) timeout;
+      }
+    ];
+    tool_result = [
+      {
+        run = testChangedRun;
+        tools = [ "bash" ];
+        paths = [ ];
+        command = testCommands;
+        timeout = 10;
+      }
+    ];
+  };
+
+  scopeJson = extraHooks: scope: {
     rules = map ruleFile scope.rules;
     inherit (scope) permissions;
-    hooks = lib.filterAttrs (_: hooks: hooks != [ ]) scope.hooks;
+    hooks = lib.filterAttrs (_: hooks: hooks != [ ]) (
+      lib.mapAttrs (event: hooks: hooks ++ (extraHooks.${event} or [ ])) scope.hooks
+    );
   };
   allScopes = [
     {
@@ -165,6 +222,28 @@ in
       default = self.packages.${pkgs.stdenv.hostPlatform.system}.rules;
       defaultText = lib.literalExpression "pi-rules.packages.\${system}.rules";
       description = "The package with the rules of this flake, one <name>.md per rule.";
+    };
+
+    hooksPackage = lib.mkOption {
+      type = lib.types.package;
+      default = self.packages.${pkgs.stdenv.hostPlatform.system}.hooks;
+      defaultText = lib.literalExpression "pi-rules.packages.\${system}.hooks";
+      description = "The package with the hook scripts of this flake, one <name>.sh per hook.";
+    };
+
+    testChanged = {
+      enable = lib.mkEnableOption ''
+        the test-changed hook everywhere: a bash call that runs a test tool directly (pytest, vitest,
+        jest, bun test, Invoke-Pester, go/cargo/dotnet test, npm test, ...) in a repository with a
+        `test-changed` recipe in its justfile is blocked, and `just test <paths>` or
+        `just test-changed` runs instead; the model gets one sentence with the result, and the
+        failures. In a repository without the recipe, the tool result gets one sentence that the
+        test-speed skill sets it up'';
+      timeout = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 900;
+        description = "Seconds the test-changed hook may run; the recipe gets 30 seconds less.";
+      };
     };
 
     agentDir = lib.mkOption {
@@ -223,8 +302,8 @@ in
     home.file = {
       "${cfg.agentDir}/extensions/repo-rules".source = cfg.package;
       "${cfg.agentDir}/repo-rules.json".source = json.generate "repo-rules.json" {
-        global = scopeJson cfg.global;
-        repos = lib.mapAttrs (_: scopeJson) cfg.repos;
+        global = scopeJson testChangedHooks cfg.global;
+        repos = lib.mapAttrs (_: scopeJson { }) cfg.repos;
       };
     };
   };

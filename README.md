@@ -20,6 +20,10 @@ in [pi-skills](https://github.com/Patrick-Kappen/pi-skills) and `repo-mcp` in
 |---|---|
 | [`conventional-commits`](rules/conventional-commits.md) | Commit messages, branches and PR titles |
 
+| Hook | What it does |
+|---|---|
+| [`test-changed`](hooks/test-changed.sh) | Blocks a direct test run (`pytest`, `vitest`, `Invoke-Pester`, ...) where a `test-changed` recipe exists, and runs the recipe instead |
+
 ## Use with Home Manager
 
 ```nix
@@ -77,6 +81,9 @@ The module installs the extension in `~/.pi/agent/extensions/repo-rules` and wri
 | `global.hooks.<event>`, `repos.<pattern>.hooks.<event>` | `[ ]` | Hooks: `{ run; tools; paths; command; timeout; }` on `session_start`, `before_agent_start`, `tool_call`, `tool_result`, `agent_before_settle` or `session_shutdown`. See the [extension README](extensions/repo-rules/README.md#hooks). |
 | `package` | `packages.<system>.repo-rules` | The extension. |
 | `rulesPackage` | `packages.<system>.rules` | The rules of this flake. |
+| `testChanged.enable` | `false` | The [test-changed hook](#the-test-changed-hook) everywhere. |
+| `testChanged.timeout` | `900` | Seconds the test-changed hook may run; the recipe gets 30 seconds less. |
+| `hooksPackage` | `packages.<system>.hooks` | The hook scripts of this flake. |
 | `agentDir` | `.pi/agent` | pi's agent directory relative to home. |
 
 A rule entry is the name of a rule of this flake, a Nix path (copied to the store), or an absolute
@@ -85,6 +92,27 @@ path or `~/path` (read as it is, so you can change it without a rebuild).
 In pi, `/repo-rules` shows which scopes, rules, permissions and hooks apply to the current
 repository. After changing
 the configuration or a rule, run `/reload` in pi.
+
+## The test-changed hook
+
+`programs.pi-rules.testChanged.enable = true;` makes test runs go through the repository's recipes,
+so an agent runs the tests that cover its change, and reads one line instead of a long log.
+
+- A bash call that runs a test tool directly (`pytest`, `python -m pytest`, `vitest`, `jest`,
+  `bun test`, `Invoke-Pester` or `pwsh ... Invoke-Pester`, `go test`, `cargo test`, `dotnet test`,
+  `npm test`; also behind `cd <dir> &&`, `timeout`, `npx`, `uv run` or `devenv shell --`) is
+  blocked when the repository's justfile has a `test-changed` recipe.
+- Instead, the hook runs `just test <paths>` when the command named test files or folders, else
+  `just test-changed`. The model gets one sentence: what was blocked, what ran, and its last line
+  (`Passed 11 Failed 0 Skipped 0 in 11.0s (2 files)`); when the tests fail, also the last 40 lines.
+- The recipes themselves (`just test`, `just test-changed`, `just test-serial`, and the devenv
+  scripts behind them) are not blocked: `just test` is the full run before the agent reports done.
+- In a repository without the recipe nothing is blocked; the tool result gets one sentence that
+  the test-speed skill of [pi-skills](https://github.com/Patrick-Kappen/pi-skills) sets the
+  recipes up.
+
+It needs `just` on the `PATH`. The recipe contract (what `test-changed` gets and prints) is in the
+test-speed skill.
 
 ## Writing a rule
 
@@ -108,9 +136,10 @@ it to `rules/<name>.md` in this repository; it is then available by its name.
 | Path | Contains |
 |---|---|
 | `rules/` | The rules of this flake |
+| `hooks/` | The hook scripts of this flake, with their tests |
 | `extensions/repo-rules/` | The extension, with unit tests |
 | `test/integration/` | Runs the extension in pi's own session, with a scripted model |
-| `nix/package.nix`, `nix/rules.nix` | The packages `repo-rules` and `rules` |
+| `nix/package.nix`, `nix/rules.nix`, `nix/hooks.nix` | The packages `repo-rules`, `rules` and `hooks` |
 | `nix/home-manager.nix` | The Home Manager module |
 | `nix/checks.nix`, `test/nix/` | Flake checks: packages, module, and the generated files with node |
 
