@@ -116,6 +116,10 @@ interface State {
   hooks: Hook[];
   /** `ask` decisions the user allowed for the rest of the session: the rule and what it matched. */
   approved: Set<string>;
+  /** Calls the user allowed once with /repo-rules allow: the rule and what it matched. */
+  allowedOnce: Set<string>;
+  /** The last call a rule blocked, for /repo-rules allow. */
+  lastBlocked?: { key: string; what: string; rule: string };
   errors: string[];
   /** Rule files already in the context. */
   delivered: Set<string>;
@@ -249,6 +253,7 @@ export function createRepoRules(pi: RepoRulesApi, options: Options = {}): void {
       permissions: selectPermissions(config, match),
       hooks: selectHooks(config, match),
       approved: new Set(),
+      allowedOnce: new Set(),
       errors: [...config.errors, ...errors],
       delivered: deliveredRules(ctx.sessionManager.buildContextEntries()),
       pending: new Map(),
@@ -340,8 +345,20 @@ export function createRepoRules(pi: RepoRulesApi, options: Options = {}): void {
   });
 
   pi.registerCommand("repo-rules", {
-    description: "Show which repository pi is in and which repo-rules scopes, rules, permissions and hooks apply",
-    handler: async (_args, ctx) => {
+    description:
+      "Show which repo-rules scopes, rules, permissions and hooks apply; /repo-rules allow lets the last blocked call through once",
+    handler: async (args, ctx) => {
+      if (args.trim() === "allow") {
+        const blocked = state?.lastBlocked;
+        if (!state || !blocked) {
+          ctx.ui.notify("repo-rules: nothing was blocked in this session", "info");
+          return;
+        }
+        state.allowedOnce.add(blocked.key);
+        delete state.lastBlocked;
+        ctx.ui.notify(`repo-rules: allowed once: ${blocked.what} (${blocked.rule})`, "info");
+        return;
+      }
       ctx.ui.notify(describe(loadConfig(file, home), matchContext(ctx.cwd), state?.delivered ?? new Set()), "info");
     },
   });
@@ -357,12 +374,19 @@ async function checkPermissions(
   if (decision.action === "allow" || !decision.permission) return undefined;
   const what = describeSubject(event.toolName, decision.subject);
   const rule = `${decision.permission.action} "${decision.permission.text}" (${decision.permission.scope})`;
-  if (decision.action === "deny") return { block: true, reason: `repo-rules: ${what} is denied by ${rule}.` };
-
   const key = `${decision.permission.text}\n${what}`;
+  // The user allowed this call once with /repo-rules allow.
+  if (state.allowedOnce.delete(key)) return undefined;
+  const once = " The user can allow it once with /repo-rules allow.";
+  if (decision.action === "deny") {
+    state.lastBlocked = { key, what, rule };
+    return { block: true, reason: `repo-rules: ${what} is denied by ${rule}.${once}` };
+  }
+
   if (state.approved.has(key)) return undefined;
   if (!ctx.hasUI) {
-    return { block: true, reason: `repo-rules: ${what} needs approval (${rule}), and there is no UI to ask.` };
+    state.lastBlocked = { key, what, rule };
+    return { block: true, reason: `repo-rules: ${what} needs approval (${rule}), and there is no UI to ask.${once}` };
   }
   const choice = await ctx.ui.select(
     `repo-rules: allow ${what}?\n${rule}`,

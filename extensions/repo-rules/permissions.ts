@@ -1,4 +1,5 @@
 import { basename, isAbsolute } from "node:path";
+import { onMain } from "./branch.ts";
 import { fileReadByCommand, realpathLoose, relativeTo, resolvePath } from "./files.ts";
 import { globToRegExp } from "./glob.ts";
 
@@ -73,12 +74,16 @@ export function commandMatches(pattern: string, command: string): boolean {
   return new RegExp(`^${body}${tail}$`, "s").test(command.trim());
 }
 
+/** The specifier for files in a main checkout or on the default branch: `edit(@main)`. */
+export const MAIN = "@main";
+
 /**
  * A path glob: `~/...` and `//abs/...` are absolute, anything else is relative to the root, with the
  * globs of rule `paths`.
  */
 export function pathMatches(pattern: string, path: string, where: Where): boolean {
   const glob = pattern.trim();
+  if (glob === MAIN) return onMain(path);
   if (glob.startsWith("~/") || glob.startsWith("//")) {
     const absolute = glob.startsWith("~/") ? resolvePath(glob, where.cwd, where.home) : glob.slice(1);
     const regex = globToRegExp(`/${absolute.slice(1)}`);

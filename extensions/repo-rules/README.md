@@ -75,6 +75,7 @@ A rule is a pi tool name, optionally with a specifier in parentheses:
 | `bash(git push *)` | A command: `*` matches anything, and `cmd *` also matches `cmd` alone. Each command of a line is checked: `a && b`, `a; b`, `a \| b`, `$(...)`, and the script of `bash -c '...'`, without `VAR=x`, `sudo` and `env` in front. |
 | `read(.env)` | Reading a path: `read`, `grep`, `find` and `ls` on that path, and bash commands that print it (`cat .env`). |
 | `edit(flake.lock)` | Changing a path: `edit` and `write`. |
+| `edit(@main)` | Changing a file on main: in the main checkout of a repository (not a linked worktree), or on its default branch (origin's HEAD; without it `main` or `master`). With `deny`, agents must work in a worktree. |
 | `write(dist/**)` | Only the `write` tool. |
 | `grep(...)`, `find(...)`, `ls(...)` | Only that tool, on its `path` (by default the working directory). |
 | `mcp__github__delete_*`, `codemode` | Any other tool, by name; `*` in the name matches anything. |
@@ -82,6 +83,10 @@ A rule is a pi tool name, optionally with a specifier in parentheses:
 Paths use the [globs of rules](#rules), relative to the root of the repository. `~/...` and
 `//abs/...` are absolute: `read(~/.ssh/**)`, `read(//etc/**)`. Tool names are not case-sensitive,
 so `Bash(...)` and `Read(...)` from Claude Code work too.
+
+**Once.** When a rule blocks a call (a `deny`, or an `ask` without a UI), the agent is told that you can
+allow it once. `/repo-rules allow` lets the last blocked call through, once: the same rule and the
+same command or file. The next one is blocked again.
 
 Permissions are a guardrail, not a sandbox: a command can still reach a file in a way the rules
 do not see, for example `python -c 'print(open(".env").read())'`.
@@ -176,6 +181,7 @@ other rules still apply.
 
 ## Commands
 
+`/repo-rules allow` lets the last blocked call through once (see [Permissions](#permissions)).
 `/repo-rules` shows the following:
 
 - the config file and the working directory
