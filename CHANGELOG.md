@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/Patrick-Kappen/pi-rules/compare/v0.1.0...v0.1.1) (2026-10-31)
+
+
+### Bug Fixes
+
+* **deps:** override minimatch to ^11.0.1 for GHSA-g3hv-75wg-m249 ([#5](https://github.com/Patrick-Kappen/pi-rules/issues/5)) ([d2f2b9f](https://github.com/Patrick-Kappen/pi-rules/commit/d2f2b9f1221e04f4373ad604d41ba0fef40eb1aa))
+
 ## 0.1.0 (2026-10-30)
 
 
