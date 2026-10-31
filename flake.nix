@@ -33,6 +33,8 @@
         repo-rules = pkgs.callPackage ./nix/package.nix { inherit version; };
         # The rules of rules/<name>.md.
         rules = pkgs.callPackage ./nix/rules.nix { inherit version; };
+        # The hook scripts of hooks/<name>.sh.
+        hooks = pkgs.callPackage ./nix/hooks.nix { inherit version; };
         default = repo-rules;
       });
 

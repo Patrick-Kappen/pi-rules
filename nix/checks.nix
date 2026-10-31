@@ -38,9 +38,35 @@ let
     # A rule from elsewhere, by Nix path.
     repos."Patrick-Kappen/*".rules = [ ../test/nix/api.md ];
   };
+  # The test-changed hook: its scripts and the hooks it adds to global.
+  hmTestChanged = hmConfig {
+    global.hooks.tool_call = [ { run = "own"; } ];
+    testChanged = {
+      enable = true;
+      timeout = 600;
+    };
+  };
 in
 {
-  inherit (packages) repo-rules rules;
+  inherit (packages) repo-rules rules hooks;
+
+  # The test-changed option adds a tool_call and a tool_result hook after the own hooks of global.
+  home-manager-test-changed =
+    pkgs.runCommand "home-manager-test-changed-check"
+      {
+        nativeBuildInputs = [ pkgs.jq ];
+        homeFiles = hmTestChanged.config.home-files;
+      }
+      ''
+        config="$homeFiles/.pi/agent/repo-rules.json"
+        jq -e --arg run "TEST_CHANGED_TIMEOUT=570 ${packages.hooks}/test-changed.sh" \
+          '.global.hooks.tool_call | length == 2 and .[0].run == "own" and .[1].run == $run and .[1].timeout == 600 and .[1].tools == ["bash"] and (.[1].command | index("pytest *"))' "$config"
+        jq -e --arg run "${packages.hooks}/test-changed.sh" \
+          '.global.hooks.tool_result == [{ run: $run, tools: ["bash"], paths: [], command: .global.hooks.tool_call[1].command, timeout: 10 }]' "$config"
+        test -x ${packages.hooks}/test-changed.sh
+        head -1 ${packages.hooks}/test-changed.sh | grep -q '^#!/nix/store/.*/bash$'
+        touch $out
+      '';
 
   # Builds a Home Manager configuration with the module and runs the generated files with node.
   home-manager =
