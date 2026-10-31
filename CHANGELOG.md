@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/Patrick-Kappen/pi-rules/compare/v0.2.0...v0.3.0) (2026-10-31)
+
+
+### Features
+
+* test-changed hook that runs the test recipe instead of a direct test run ([#10](https://github.com/Patrick-Kappen/pi-rules/issues/10)) ([5cfce23](https://github.com/Patrick-Kappen/pi-rules/commit/5cfce23df861cd19ee6bb3c2a8c4d7addb8ec394))
+
 ## [0.2.0](https://github.com/Patrick-Kappen/pi-rules/compare/v0.1.1...v0.2.0) (2026-10-31)
 
 
